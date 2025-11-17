@@ -4,7 +4,6 @@ format: html
 ---
 # Load libraries
 ```{r setup, include=FALSE}
-set.seed(1)
 #suppressPackageStartupMessages(library(tidyverse))
 lapply(c("ggplot2", "dplyr", "tidyr", "readr", "purrr", "tibble", "forcats"), library, character.only = TRUE)
 suppressPackageStartupMessages(library(tidymodels))
@@ -43,9 +42,27 @@ bike_data <- bike_data |> rename(date = Date,
                     func_day = `Functioning Day`)
 ```
 
+## Transform Data
+Note, the variable `Functioning Day` also renamed `func_day` is dropped in the grouping.
+Also, rainfall and snowfall means were not calculated with the rest of the mean weather variables.
+```{r}
+bikes <- bike_data |>
+    filter(func_day == "Yes") |>
+    select(-func_day) |>
+    group_by(date, season, holiday) |> 
+    summarize(bike_count = sum(bike_count, na.rm = TRUE),
+              rainfall   = sum(rainfall, na.rm = TRUE),
+              snowfall   = sum(snowfall, na.rm = TRUE),
+              across(c(temp, humidity, wind_speed, visibility, dew_point, solar_rad),
+                     ~ mean(.x, na.rm = TRUE), .names = "{.col}"),
+              .groups = "drop",) 
+bikes
+```
+
 # Split Data
 ```{r}
-bike_split <- initial_split(bike_data, prop = 0.75, strata = season)
+set.seed(1)
+bike_split <- initial_split(bikes, prop = 0.75, strata = season)
 bike_train <- training(bike_split)
 bike_test <- testing(bike_split)
 bike_10_fold <- vfold_cv(bike_train, 10)
@@ -55,7 +72,7 @@ bike_10_fold <- vfold_cv(bike_train, 10)
 ## First Linear Model and Recipe
 Model uses all variables to predict `bike_count`.
 ```{r}
-linear_recipe1 <-
+mlr_recipe1 <-
     recipe(bike_count ~ ., data = bike_train) |>
     update_role(date, new_role = "ID") |>
     step_date(date, features = c("dow")) |>
@@ -64,77 +81,61 @@ linear_recipe1 <-
         levels = c("weekday", "weekend"))
     ) |>
     step_rm(date_dow) |>
-    step_normalize(all_numeric(), -all_outcomes()) |>
+    step_normalize(all_numeric_predictors()) |>
     step_dummy(season, holiday, day_type)
 ```
 
 ## Second Linear Model and Recipe
 Adding interaction terms between `season:holiday`, `season:temp`, and `temp:rainfall` to model 1.
 ```{r}
-linear_recipe2 <-
-    recipe(bike_count ~ ., data = bike_train) |>
-    update_role(date, new_role = "ID") |>
-    step_date(date, features = c("dow")) |>
-    step_mutate(day_type = factor(
-        if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
-        levels = c("weekday", "weekend"))
-    ) |>
-    step_rm(date_dow) |>
-    step_normalize(all_numeric(), -all_outcomes()) |>
-    step_dummy(season, holiday, day_type) |>
-    step_interact(terms = ~ starts_with("season_"):starts_with("holiday_")) |>
-    step_interact(terms = ~ starts_with("season_"):temp) |>
-    step_interact(terms = ~ temp*rainfall)
+mlr_recipe2 <-
+    mlr_recipe1 |>
+    step_interact(terms = ~ starts_with("season")*starts_with("holiday") +
+                      starts_with("season")*temp +
+                      temp*rainfall)
 ```
 
 ## Third Linear Model and Recipe
 Added quadratic terms to all numeric variables from model 2.
 ```{r}
-linear_recipe3 <-
-    recipe(bike_count ~ ., data = bike_train) |>
-    update_role(date, new_role = "ID") |>
-    step_date(date, features = c("dow")) |>
-    step_mutate(day_type = factor(
-        if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
-        levels = c("weekday", "weekend"))
-    ) |>
-    step_rm(date_dow) |>
-    step_normalize(all_numeric(), -all_outcomes()) |>
-    step_poly(all_numeric(), -all_outcomes(), degree = 2) |>
-    step_dummy(season, holiday, day_type) |>
-    step_interact(terms = ~ starts_with("season_"):starts_with("holiday_")) |>
-    step_interact(terms = ~ starts_with("season_"):starts_with("temp_poly_")) |> 
-    step_interact(terms = ~ starts_with("temp_poly_"):starts_with("rainfall_poly_"))
+mlr_recipe3 <- 
+    mlr_recipe2 |>
+    step_poly(rainfall, snowfall, temp, humidity, wind_speed, visibility, dew_point, solar_rad, 
+              degree = 2)
 ```
 
-## Set up linear regression engine and workflow
+## Set up linear regression engine, workflow, and fit models using 10-fold CV split
 ```{r}
-linear_model <- linear_reg() |> set_engine("lm")
-linear_workflow1 <- workflow() |> add_recipe(linear_recipe1) |> add_model(linear_model)
-linear_workflow2 <- workflow() |> add_recipe(linear_recipe2) |> add_model(linear_model)
-linear_workflow3 <- workflow() |> add_recipe(linear_recipe3) |> add_model(linear_model)
-```
-
-## Fit linear models using 10-fold CV split
-```{r}
-linear_fit1 <- linear_workflow1 |> fit_resamples(bike_10_fold)
-linear_fit2 <- linear_workflow2 |> fit_resamples(bike_10_fold)
-linear_fit3 <- linear_workflow3 |> fit_resamples(bike_10_fold)
+linear_spec <- linear_reg() |> set_engine("lm")
+mlr_fit1 <- workflow() |> add_recipe(mlr_recipe1) |> add_model(linear_spec) |> fit_resamples(bike_10_fold)
+mlr_fit2 <- workflow() |> add_recipe(mlr_recipe2) |> add_model(linear_spec) |> fit_resamples(bike_10_fold)
+mlr_fit3 <- workflow() |> add_recipe(mlr_recipe3) |> add_model(linear_spec) |> fit_resamples(bike_10_fold)
 ```
 
 ## Training Performance Metrics
-```{r, eval=FALSE}
+```{r}
 rbind(
-    linear_fit1 |> collect_metrics(),
-    linear_fit2 |> collect_metrics(),
-    linear_fit3 |> collect_metrics())
+    mlr_fit1 |> collect_metrics(),
+    mlr_fit2 |> collect_metrics(),
+    mlr_fit3 |> collect_metrics())
 ```
 
 ## Select Linear Best Model to Predict Test Data and Final Output
 ```{r}
-linear_workflow3 |> last_fit(bike_split) |> collect_metrics()
+final_fit <- workflow() |> add_recipe(mlr_recipe3) |> add_model(linear_spec) |> last_fit(bike_split)
+final_fit |> collect_metrics()
 ```
-```{r, eval=FALSE}
 
-linear_workflow3 |> last_fit(bike_split) |> extract_fit_parsnip() |> tidy()
+```{r}
+final_fit |> extract_fit_parsnip() |> tidy()
 ```
+
+# LASSO Model
+```{r}
+lasso_recipe <- linear_recipe1
+lasso_spec <- linear_reg(penalty = tune(), mixture = 1) |> set_engine("glmnet")
+lasso_workflow <- workflow() |> add_recipe(lasso_recipe) |> add_model(lasso_spec)
+lasso_grid <- lasso_workflow |> tune_grid(resamples = bike_10_fold,
+                                          grid = grid_regular(penalty(), levels = 200)) 
+```
+
