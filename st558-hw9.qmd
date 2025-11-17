@@ -1,0 +1,140 @@
+---
+title: "ST-558 Homework 9"
+format: html
+---
+# Load libraries
+```{r setup, include=FALSE}
+set.seed(1)
+#suppressPackageStartupMessages(library(tidyverse))
+lapply(c("ggplot2", "dplyr", "tidyr", "readr", "purrr", "tibble", "forcats"), library, character.only = TRUE)
+suppressPackageStartupMessages(library(tidymodels))
+```
+
+# Read in Data
+```{r}
+bike_data <- read_csv("https://www4.stat.ncsu.edu/~online/datasets/SeoulBikeData.csv",
+                      locale = locale(encoding = "latin1"))
+```
+
+## Convert `Date` into a date format
+## Recode `Seasons`, `Holiday`, and `Functioning Day` as factors
+```{r}
+bike_data <- bike_data |> mutate(Date = lubridate::dmy(Date),
+                                 Seasons = factor(Seasons),
+                                 Holiday = factor(Holiday),
+                                 `Functioning Day` = factor(`Functioning Day`))
+```
+
+## Rename variables
+```{r}
+bike_data <- bike_data |> rename(date = Date,
+                    bike_count = `Rented Bike Count`,
+                    hour = Hour,
+                    temp = `Temperature(°C)`,
+                    humidity = `Humidity(%)`, 
+                    wind_speed = `Wind speed (m/s)`,
+                    visibility = `Visibility (10m)`,
+                    dew_point = `Dew point temperature(°C)`,
+                    solar_rad = `Solar Radiation (MJ/m2)`,
+                    rainfall = `Rainfall(mm)`,
+                    snowfall = `Snowfall (cm)`,
+                    season = Seasons,
+                    holiday = Holiday,
+                    func_day = `Functioning Day`)
+```
+
+# Split Data
+```{r}
+bike_split <- initial_split(bike_data, prop = 0.75, strata = season)
+bike_train <- training(bike_split)
+bike_test <- testing(bike_split)
+bike_10_fold <- vfold_cv(bike_train, 10)
+```
+
+# Fitting MLR Models
+## First Linear Model and Recipe
+Model uses all variables to predict `bike_count`.
+```{r}
+linear_recipe1 <-
+    recipe(bike_count ~ ., data = bike_train) |>
+    update_role(date, new_role = "ID") |>
+    step_date(date, features = c("dow")) |>
+    step_mutate(day_type = factor(
+        if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
+        levels = c("weekday", "weekend"))
+    ) |>
+    step_rm(date_dow) |>
+    step_normalize(all_numeric(), -all_outcomes()) |>
+    step_dummy(season, holiday, day_type)
+```
+
+## Second Linear Model and Recipe
+Adding interaction terms between `season:holiday`, `season:temp`, and `temp:rainfall` to model 1.
+```{r}
+linear_recipe2 <-
+    recipe(bike_count ~ ., data = bike_train) |>
+    update_role(date, new_role = "ID") |>
+    step_date(date, features = c("dow")) |>
+    step_mutate(day_type = factor(
+        if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
+        levels = c("weekday", "weekend"))
+    ) |>
+    step_rm(date_dow) |>
+    step_normalize(all_numeric(), -all_outcomes()) |>
+    step_dummy(season, holiday, day_type) |>
+    step_interact(terms = ~ starts_with("season_"):starts_with("holiday_")) |>
+    step_interact(terms = ~ starts_with("season_"):temp) |>
+    step_interact(terms = ~ temp*rainfall)
+```
+
+## Third Linear Model and Recipe
+Added quadratic terms to all numeric variables from model 2.
+```{r}
+linear_recipe3 <-
+    recipe(bike_count ~ ., data = bike_train) |>
+    update_role(date, new_role = "ID") |>
+    step_date(date, features = c("dow")) |>
+    step_mutate(day_type = factor(
+        if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
+        levels = c("weekday", "weekend"))
+    ) |>
+    step_rm(date_dow) |>
+    step_normalize(all_numeric(), -all_outcomes()) |>
+    step_poly(all_numeric(), -all_outcomes(), degree = 2) |>
+    step_dummy(season, holiday, day_type) |>
+    step_interact(terms = ~ starts_with("season_"):starts_with("holiday_")) |>
+    step_interact(terms = ~ starts_with("season_"):starts_with("temp_poly_")) |> 
+    step_interact(terms = ~ starts_with("temp_poly_"):starts_with("rainfall_poly_"))
+```
+
+## Set up linear regression engine and workflow
+```{r}
+linear_model <- linear_reg() |> set_engine("lm")
+linear_workflow1 <- workflow() |> add_recipe(linear_recipe1) |> add_model(linear_model)
+linear_workflow2 <- workflow() |> add_recipe(linear_recipe2) |> add_model(linear_model)
+linear_workflow3 <- workflow() |> add_recipe(linear_recipe3) |> add_model(linear_model)
+```
+
+## Fit linear models using 10-fold CV split
+```{r}
+linear_fit1 <- linear_workflow1 |> fit_resamples(bike_10_fold)
+linear_fit2 <- linear_workflow2 |> fit_resamples(bike_10_fold)
+linear_fit3 <- linear_workflow3 |> fit_resamples(bike_10_fold)
+```
+
+## Training Performance Metrics
+```{r, eval=FALSE}
+rbind(
+    linear_fit1 |> collect_metrics(),
+    linear_fit2 |> collect_metrics(),
+    linear_fit3 |> collect_metrics())
+```
+
+## Select Linear Best Model to Predict Test Data and Final Output
+```{r}
+linear_workflow3 |> last_fit(bike_split) |> collect_metrics()
+```
+```{r, eval=FALSE}
+
+linear_workflow3 |> last_fit(bike_split) |> extract_fit_parsnip() |> tidy()
+```
