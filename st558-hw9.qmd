@@ -4,9 +4,17 @@ format: html
 ---
 # Load libraries
 ```{r setup, include=FALSE}
-#suppressPackageStartupMessages(library(tidyverse))
-lapply(c("ggplot2", "dplyr", "tidyr", "readr", "purrr", "tibble", "forcats"), library, character.only = TRUE)
+suppressPackageStartupMessages(library(tidyverse))
 suppressPackageStartupMessages(library(tidymodels))
+```
+
+# Parallel Processing
+```{r}
+library(future)
+library(doFuture)
+plan(multisession, workers = parallel::detectCores() / 2)
+registerDoFuture()
+getDoParWorkers()
 ```
 
 # Read in Data
@@ -107,9 +115,12 @@ mlr_recipe3 <-
 ## Set up linear regression engine, workflow, and fit models using 10-fold CV split
 ```{r}
 linear_spec <- linear_reg() |> set_engine("lm")
-mlr_fit1 <- workflow() |> add_recipe(mlr_recipe1) |> add_model(linear_spec) |> fit_resamples(bike_10_fold)
-mlr_fit2 <- workflow() |> add_recipe(mlr_recipe2) |> add_model(linear_spec) |> fit_resamples(bike_10_fold)
-mlr_fit3 <- workflow() |> add_recipe(mlr_recipe3) |> add_model(linear_spec) |> fit_resamples(bike_10_fold)
+mlr_workflow1 <- workflow() |> add_recipe(mlr_recipe1) |> add_model(linear_spec)
+mlr_workflow2 <- workflow() |> add_recipe(mlr_recipe2) |> add_model(linear_spec)
+mlr_workflow3 <- workflow() |> add_recipe(mlr_recipe3) |> add_model(linear_spec)
+mlr_fit1 <- mlr_workflow1 |> fit_resamples(bike_10_fold, metrics = metric_set(rmse, mae))
+mlr_fit2 <- mlr_workflow2 |> fit_resamples(bike_10_fold, metrics = metric_set(rmse, mae))
+mlr_fit3 <- mlr_workflow3 |> fit_resamples(bike_10_fold, metrics = metric_set(rmse, mae))
 ```
 
 ## Training Performance Metrics
@@ -122,20 +133,192 @@ rbind(
 
 ## Select Linear Best Model to Predict Test Data and Final Output
 ```{r}
-final_fit <- workflow() |> add_recipe(mlr_recipe3) |> add_model(linear_spec) |> last_fit(bike_split)
-final_fit |> collect_metrics()
+mlr_final_fit <- mlr_workflow3 |> last_fit(bike_split, metrics = metric_set(rmse, mae))
+mlr_final_fit |> collect_metrics()
 ```
 
 ```{r}
-final_fit |> extract_fit_parsnip() |> tidy()
+mlr_final_fit |> extract_fit_parsnip() |> tidy()
 ```
 
 # LASSO Model
 ```{r}
-lasso_recipe <- linear_recipe1
+lasso_recipe <- mlr_recipe1
 lasso_spec <- linear_reg(penalty = tune(), mixture = 1) |> set_engine("glmnet")
 lasso_workflow <- workflow() |> add_recipe(lasso_recipe) |> add_model(lasso_spec)
-lasso_grid <- lasso_workflow |> tune_grid(resamples = bike_10_fold,
-                                          grid = grid_regular(penalty(), levels = 200)) 
+
+lasso_grid <- lasso_workflow |> 
+    tune_grid(resamples = bike_10_fold,
+              grid = grid_regular(penalty(range = c(-3, 1)), levels = 400),
+              control = control_grid(save_pred = TRUE),
+              metrics = metric_set(rmse, mae)) 
+
+lasso_grid |>
+    collect_metrics() |>
+    filter(.metric == "rmse") |>
+    ggplot(aes(penalty, mean, color = .metric)) +
+    geom_line()
+
+lasso_grid |> collect_metrics() |>
+    group_by(.config, .metric) |>
+    summarize(mean = mean(mean, na.rm=TRUE), .groups = "drop") |>
+    pivot_wider(names_from = .metric, values_from = "mean") |>
+    arrange(rmse, mae)
+
+lasso_best <- lasso_grid |> select_best(metric = "rmse")
+
+lasso_final_fit <- lasso_workflow |> 
+    finalize_workflow(lasso_best) |> 
+    last_fit(bike_split, metrics = metric_set(rmse, mae))
+
+lasso_final_fit |> collect_metrics()
+lasso_final_fit |> extract_fit_parsnip() |> tidy()
+```
+
+# Regression Tree Model
+```{r}
+tree_recipe <- mlr_recipe1
+
+tree_model <- decision_tree(tree_depth = tune(),
+                            cost_complexity = tune(),
+                            min_n = tune()) |>
+            set_engine("rpart") |>
+            set_mode("regression")
+
+tree_workflow <- workflow() |> add_recipe(tree_recipe) |> add_model(tree_model)
+
+tree_grid <- grid_regular(tree_depth(),
+                          cost_complexity(),
+                          min_n(range = c(10, 20)),
+                          levels = c(50, 50, 3))
+
+tree_fits <- tree_workflow |>
+    tune_grid(resamples = bike_10_fold,
+              grid = tree_grid,
+              metrics = metric_set(rmse, mae))
+
+tree_fits |> collect_metrics() |>
+    group_by(.config, .metric) |>
+    summarize(mean = mean(mean, na.rm=TRUE), .groups = "drop") |>
+    pivot_wider(names_from = .metric, values_from = "mean") |>
+    arrange(rmse, mae)
+
+tree_best <- select_best(tree_fits, metric = "rmse")
+
+
+tree_final_fit <- tree_workflow |>
+    finalize_workflow(tree_best) |>
+    last_fit(bike_split,
+             metrics = metric_set(rmse, mae))
+
+tree_final_fit |> collect_metrics()
+
+#tree_final_model <- extract_workflow(tree_final) 
+#tree_final_model |>
+#    extract_fit_engine() |>
+#    rpart.plot::rpart.plot(roundint = FALSE)
+```
+
+# Bagged Tree Model
+```{r}
+bag_recipe <- mlr_recipe1
+bag_spec <- bag_tree(tree_depth = tune(),
+                     min_n = tune(),
+                     cost_complexity = tune()) |>
+    set_engine("rpart") |>
+    set_mode("regression")
+
+bag_workflow <- workflow() |>
+    add_recipe(bag_recipe) |>
+    add_model(bag_spec)
+
+bag_grid <- grid_regular(tree_depth(),
+                         min_n(range = c(10, 30)),
+                         cost_complexity(),
+                         levels = c(5, 3, 15))
+
+bag_fit <- bag_workflow |>
+    tune_grid(resamples = bike_10_fold,
+              grid = bag_grid,
+              metrics = metric_set(rmse, mae))
+
+bag_fit |> collect_metrics() |>
+    group_by(.config, .metric) |>
+    summarize(mean = mean(mean, na.rm=TRUE), .groups = "drop") |>
+    pivot_wider(names_from = .metric, values_from = "mean") |>
+    arrange(rmse, mae)
+
+bag_best <- select_best(bag_fit, metric = "rmse")
+
+bag_final_fit <- bag_workflow |>
+    finalize_workflow(bag_best) |>
+    last_fit(bike_split, metrics = metric_set(rmse, mae))
+
+bag_final_fit |> collect_metrics()
+```
+
+# Random Forest Model
+```{r}
+rf_recipe <- mlr_recipe1
+
+rf_spec <- rand_forest(mtry = tune()) |>
+    set_engine("ranger", oob.error = TRUE) |>
+    set_mode("regression")
+
+rf_workflow <- workflow() |>
+    add_recipe(rf_recipe) |>
+    add_model(rf_spec)
+
+rf_fit <- rf_workflow |>
+    tune_grid(resamples = bike_10_fold,
+    grid = 1000,
+    metrics = metric_set(rmse, mae))
+
+rf_fit |> collect_metrics() |>
+    group_by(.config, .metric, mtry) |>
+    summarize(mean = mean(mean, na.rm=TRUE), .groups = "drop") |>
+    pivot_wider(names_from = .metric, values_from = "mean") |>
+    arrange(rmse, mae)
+
+rf_best <- select_best(rf_fit, metric = "rmse")
+
+rf_final_fit <- rf_workflow |>
+    finalize_workflow(rf_best) |>
+    last_fit(bike_split, metrics = metric_set(rmse, mae))
+
+rf_final_fit |> collect_metrics()
+
+ranger_fit <- rf_final_fit |> extract_fit_engine()
+oob_rmse <- sqrt(ranger_fit$prediction.error)
+oob_rmse
+```
+
+
+# Compare all final candidate models on test set
+```{r}
+rbind(
+    mlr_final_fit |>
+        collect_metrics() |> 
+        mutate(Model = "MLR", .before = ".metric"), 
+    lasso_final_fit |>
+        collect_metrics() |> 
+        mutate(Model = "LASSO", .before = ".metric"), 
+    tree_final_fit |>
+        collect_metrics() |> 
+        mutate(Model = "TREE", .before = ".metric"),
+    bag_final_fit |>
+        collect_metrics() |> 
+        mutate(Model = "BAG", .before = ".metric"),
+    rf_final_fit |>
+        collect_metrics() |> 
+        mutate(Model = "RF", .before = ".metric")
+) |> group_by(Model, .metric) |>
+    summarize(estimate = mean(.estimate, na.rm=TRUE), .groups = "drop") |>
+    pivot_wider(names_from = .metric, values_from = estimate) |>
+    arrange(rmse)
+```
+
+```{r}
+plan(sequential)
 ```
 
