@@ -1,0 +1,79 @@
+[
+  {
+    "objectID": "st558-hw9.html",
+    "href": "st558-hw9.html",
+    "title": "ST-558 Homework 9",
+    "section": "",
+    "text": "The data processing and transformations from my version of Homework 8 have been corrected. Now all models will be correctly fit on transformed data with daily observations instead of the original hourly observations. Further, any incorrect predictors, like hour or Functioning Day, have been removed from the transformed data, and observations on non-functioning days have been dropped given there were no bike rentals on those days."
+  },
+  {
+    "objectID": "st558-hw9.html#convert-date-into-a-date-format",
+    "href": "st558-hw9.html#convert-date-into-a-date-format",
+    "title": "ST-558 Homework 9",
+    "section": "Convert Date into a date format",
+    "text": "Convert Date into a date format"
+  },
+  {
+    "objectID": "st558-hw9.html#recode-seasons-holiday-and-functioning-day-as-factors",
+    "href": "st558-hw9.html#recode-seasons-holiday-and-functioning-day-as-factors",
+    "title": "ST-558 Homework 9",
+    "section": "Recode Seasons, Holiday, and Functioning Day as factors",
+    "text": "Recode Seasons, Holiday, and Functioning Day as factors\n\nbike_data &lt;- bike_data |&gt; mutate(Date = lubridate::dmy(Date),\n                                 Seasons = factor(Seasons),\n                                 Holiday = factor(Holiday),\n                                 `Functioning Day` = factor(`Functioning Day`))"
+  },
+  {
+    "objectID": "st558-hw9.html#rename-variables",
+    "href": "st558-hw9.html#rename-variables",
+    "title": "ST-558 Homework 9",
+    "section": "Rename variables",
+    "text": "Rename variables\n\nbike_data &lt;- bike_data |&gt; rename(date = Date,\n                    bike_count = `Rented Bike Count`,\n                    hour = Hour,\n                    temp = `Temperature(°C)`,\n                    humidity = `Humidity(%)`, \n                    wind_speed = `Wind speed (m/s)`,\n                    visibility = `Visibility (10m)`,\n                    dew_point = `Dew point temperature(°C)`,\n                    solar_rad = `Solar Radiation (MJ/m2)`,\n                    rainfall = `Rainfall(mm)`,\n                    snowfall = `Snowfall (cm)`,\n                    season = Seasons,\n                    holiday = Holiday,\n                    func_day = `Functioning Day`)"
+  },
+  {
+    "objectID": "st558-hw9.html#transform-data",
+    "href": "st558-hw9.html#transform-data",
+    "title": "ST-558 Homework 9",
+    "section": "Transform Data",
+    "text": "Transform Data\nNote, the variable Functioning Day also renamed func_day is dropped in the grouping. Also, rainfall and snowfall means were not calculated with the rest of the mean weather variables. Drop records on non-functioning days or days with no bike rentals.\n\nbikes &lt;- bike_data |&gt;\n    filter(func_day == \"Yes\") |&gt;\n    select(-func_day) |&gt;\n    group_by(date, season, holiday) |&gt; \n    summarize(bike_count = sum(bike_count, na.rm = TRUE),\n              rainfall   = sum(rainfall, na.rm = TRUE),\n              snowfall   = sum(snowfall, na.rm = TRUE),\n              across(c(temp, humidity, wind_speed, visibility, dew_point, solar_rad),\n                     ~ mean(.x, na.rm = TRUE), .names = \"{.col}\"),\n              .groups = \"drop\",) \nbikes\n\n# A tibble: 353 × 12\n   date       season holiday    bike_count rainfall snowfall    temp humidity\n   &lt;date&gt;     &lt;fct&gt;  &lt;fct&gt;           &lt;dbl&gt;    &lt;dbl&gt;    &lt;dbl&gt;   &lt;dbl&gt;    &lt;dbl&gt;\n 1 2017-12-01 Winter No Holiday       9539      0        0   -2.45       45.9\n 2 2017-12-02 Winter No Holiday       8523      0        0    1.32       62.0\n 3 2017-12-03 Winter No Holiday       7222      4        0    4.88       81.5\n 4 2017-12-04 Winter No Holiday       8729      0.1      0   -0.304      52.5\n 5 2017-12-05 Winter No Holiday       8307      0        0   -4.46       36.4\n 6 2017-12-06 Winter No Holiday       6669      1.3      8.6  0.0458     70.8\n 7 2017-12-07 Winter No Holiday       8549      0       10.4  1.09       67.5\n 8 2017-12-08 Winter No Holiday       8032      0        0   -3.82       41.8\n 9 2017-12-09 Winter No Holiday       7233      0        0   -0.846      46  \n10 2017-12-10 Winter No Holiday       3453      4.1     32.5  1.19       69.7\n# ℹ 343 more rows\n# ℹ 4 more variables: wind_speed &lt;dbl&gt;, visibility &lt;dbl&gt;, dew_point &lt;dbl&gt;,\n#   solar_rad &lt;dbl&gt;"
+  },
+  {
+    "objectID": "st558-hw9.html#first-linear-model-and-recipe",
+    "href": "st558-hw9.html#first-linear-model-and-recipe",
+    "title": "ST-558 Homework 9",
+    "section": "First Linear Model and Recipe",
+    "text": "First Linear Model and Recipe\nModel uses all variables to predict bike_count.\n\nmlr_recipe1 &lt;-\n    recipe(bike_count ~ ., data = bike_train) |&gt;\n    update_role(date, new_role = \"ID\") |&gt;\n    step_date(date, features = c(\"dow\")) |&gt;\n    step_mutate(day_type = factor(\n        if_else(date_dow %in% c(\"Sat\", \"Sun\"), \"weekend\", \"weekday\"),\n        levels = c(\"weekday\", \"weekend\"))\n    ) |&gt;\n    step_rm(date_dow) |&gt;\n    step_normalize(all_numeric_predictors()) |&gt;\n    step_dummy(season, holiday, day_type)"
+  },
+  {
+    "objectID": "st558-hw9.html#second-linear-model-and-recipe",
+    "href": "st558-hw9.html#second-linear-model-and-recipe",
+    "title": "ST-558 Homework 9",
+    "section": "Second Linear Model and Recipe",
+    "text": "Second Linear Model and Recipe\nAdding interaction terms between season:holiday, season:temp, and temp:rainfall to model 1.\n\nmlr_recipe2 &lt;-\n    mlr_recipe1 |&gt;\n    step_interact(terms = ~ starts_with(\"season\")*starts_with(\"holiday\") +\n                      starts_with(\"season\")*temp +\n                      temp*rainfall)"
+  },
+  {
+    "objectID": "st558-hw9.html#third-linear-model-and-recipe",
+    "href": "st558-hw9.html#third-linear-model-and-recipe",
+    "title": "ST-558 Homework 9",
+    "section": "Third Linear Model and Recipe",
+    "text": "Third Linear Model and Recipe\nAdded quadratic terms to all numeric variables from model 2.\n\nmlr_recipe3 &lt;- \n    mlr_recipe2 |&gt;\n    step_poly(rainfall, snowfall, temp, humidity, wind_speed, visibility, dew_point, solar_rad, \n              degree = 2)"
+  },
+  {
+    "objectID": "st558-hw9.html#set-up-linear-regression-engine-workflow-and-fit-models-using-10-fold-cv-split",
+    "href": "st558-hw9.html#set-up-linear-regression-engine-workflow-and-fit-models-using-10-fold-cv-split",
+    "title": "ST-558 Homework 9",
+    "section": "Set up linear regression engine, workflow, and fit models using 10-fold CV split",
+    "text": "Set up linear regression engine, workflow, and fit models using 10-fold CV split\n\nlinear_spec &lt;- linear_reg() |&gt; set_engine(\"lm\")\nmlr_workflow1 &lt;- workflow() |&gt; add_recipe(mlr_recipe1) |&gt; add_model(linear_spec)\nmlr_workflow2 &lt;- workflow() |&gt; add_recipe(mlr_recipe2) |&gt; add_model(linear_spec)\nmlr_workflow3 &lt;- workflow() |&gt; add_recipe(mlr_recipe3) |&gt; add_model(linear_spec)\nmlr_fit1 &lt;- mlr_workflow1 |&gt; fit_resamples(bike_10_fold, metrics = metric_set(rmse, mae))\nmlr_fit2 &lt;- mlr_workflow2 |&gt; fit_resamples(bike_10_fold, metrics = metric_set(rmse, mae))\n\n→ A | warning: prediction from rank-deficient fit; consider predict(., rankdeficient=\"NA\")\n\nmlr_fit3 &lt;- mlr_workflow3 |&gt; fit_resamples(bike_10_fold, metrics = metric_set(rmse, mae))"
+  },
+  {
+    "objectID": "st558-hw9.html#training-performance-metrics",
+    "href": "st558-hw9.html#training-performance-metrics",
+    "title": "ST-558 Homework 9",
+    "section": "Training Performance Metrics",
+    "text": "Training Performance Metrics\n\nrbind(\n    mlr_fit1 |&gt; collect_metrics(),\n    mlr_fit2 |&gt; collect_metrics(),\n    mlr_fit3 |&gt; collect_metrics())\n\n# A tibble: 6 × 6\n  .metric .estimator  mean     n std_err .config        \n  &lt;chr&gt;   &lt;chr&gt;      &lt;dbl&gt; &lt;int&gt;   &lt;dbl&gt; &lt;chr&gt;          \n1 mae     standard   3256.    10    156. pre0_mod0_post0\n2 rmse    standard   4128.    10    186. pre0_mod0_post0\n3 mae     standard   2304.    10    156. pre0_mod0_post0\n4 rmse    standard   3248.    10    320. pre0_mod0_post0\n5 mae     standard   2221.    10    157. pre0_mod0_post0\n6 rmse    standard   3017.    10    295. pre0_mod0_post0"
+  },
+  {
+    "objectID": "st558-hw9.html#select-best-mlr-model-to-predict-test-data-and-final-performance-metrics",
+    "href": "st558-hw9.html#select-best-mlr-model-to-predict-test-data-and-final-performance-metrics",
+    "title": "ST-558 Homework 9",
+    "section": "Select Best MLR Model to Predict Test Data and Final Performance Metrics",
+    "text": "Select Best MLR Model to Predict Test Data and Final Performance Metrics\n\nmlr_final_fit &lt;- mlr_workflow3 |&gt; last_fit(bike_split, metrics = metric_set(rmse, mae))\nmlr_final_fit |&gt; collect_metrics()\n\n# A tibble: 2 × 4\n  .metric .estimator .estimate .config        \n  &lt;chr&gt;   &lt;chr&gt;          &lt;dbl&gt; &lt;chr&gt;          \n1 rmse    standard       2745. pre0_mod0_post0\n2 mae     standard       2021. pre0_mod0_post0"
+  }
+]
