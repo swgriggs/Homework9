@@ -2,17 +2,25 @@
 title: "ST-558 Homework 9"
 format: html
 ---
+# Intro
+The data processing and transformations from my version of Homework 8 have been corrected. Now all
+models will be correctly fit on transformed data with daily observations instead of the original
+hourly observations. Further, any incorrect predictors, like `hour` or `Functioning Day`, have been
+removed from the transformed data, and observations on non-functioning days have been dropped given
+there were no bike rentals on those days.
+
 # Load libraries
-```{r setup, include=FALSE}
+```{r setup}
 suppressPackageStartupMessages(library(tidyverse))
 suppressPackageStartupMessages(library(tidymodels))
+suppressPackageStartupMessages(library(baguette))
 ```
 
 # Parallel Processing
 ```{r}
-library(future)
-library(doFuture)
-plan(multisession, workers = parallel::detectCores() / 2)
+suppressPackageStartupMessages(library(future))
+suppressPackageStartupMessages(library(doFuture))
+plan(multisession, workers = parallel::detectCores() - 1)
 registerDoFuture()
 getDoParWorkers()
 ```
@@ -53,6 +61,7 @@ bike_data <- bike_data |> rename(date = Date,
 ## Transform Data
 Note, the variable `Functioning Day` also renamed `func_day` is dropped in the grouping.
 Also, rainfall and snowfall means were not calculated with the rest of the mean weather variables.
+Drop records on non-functioning days or days with no bike rentals.
 ```{r}
 bikes <- bike_data |>
     filter(func_day == "Yes") |>
@@ -131,14 +140,10 @@ rbind(
     mlr_fit3 |> collect_metrics())
 ```
 
-## Select Linear Best Model to Predict Test Data and Final Output
+## Select Best MLR Model to Predict Test Data and Final Performance Metrics
 ```{r}
 mlr_final_fit <- mlr_workflow3 |> last_fit(bike_split, metrics = metric_set(rmse, mae))
 mlr_final_fit |> collect_metrics()
-```
-
-```{r}
-mlr_final_fit |> extract_fit_parsnip() |> tidy()
 ```
 
 # LASSO Model
@@ -172,7 +177,6 @@ lasso_final_fit <- lasso_workflow |>
     last_fit(bike_split, metrics = metric_set(rmse, mae))
 
 lasso_final_fit |> collect_metrics()
-lasso_final_fit |> extract_fit_parsnip() |> tidy()
 ```
 
 # Regression Tree Model
@@ -205,18 +209,12 @@ tree_fits |> collect_metrics() |>
 
 tree_best <- select_best(tree_fits, metric = "rmse")
 
-
 tree_final_fit <- tree_workflow |>
     finalize_workflow(tree_best) |>
     last_fit(bike_split,
              metrics = metric_set(rmse, mae))
 
 tree_final_fit |> collect_metrics()
-
-#tree_final_model <- extract_workflow(tree_final) 
-#tree_final_model |>
-#    extract_fit_engine() |>
-#    rpart.plot::rpart.plot(roundint = FALSE)
 ```
 
 # Bagged Tree Model
@@ -236,11 +234,12 @@ bag_grid <- grid_regular(tree_depth(),
                          min_n(range = c(10, 30)),
                          cost_complexity(),
                          levels = c(5, 3, 15))
-
+suppressMessages({
 bag_fit <- bag_workflow |>
     tune_grid(resamples = bike_10_fold,
               grid = bag_grid,
               metrics = metric_set(rmse, mae))
+})
 
 bag_fit |> collect_metrics() |>
     group_by(.config, .metric) |>
@@ -262,7 +261,7 @@ bag_final_fit |> collect_metrics()
 rf_recipe <- mlr_recipe1
 
 rf_spec <- rand_forest(mtry = tune()) |>
-    set_engine("ranger", oob.error = TRUE) |>
+    set_engine("ranger", oob.error = TRUE, importance = "impurity") |>
     set_mode("regression")
 
 rf_workflow <- workflow() |>
@@ -293,6 +292,39 @@ oob_rmse <- sqrt(ranger_fit$prediction.error)
 oob_rmse
 ```
 
+# MLR Coefficient Table
+```{r}
+mlr_final_fit |> extract_fit_parsnip() |> tidy() |> knitr::kable()
+```
+
+# LASSO Coefficient Table
+```{r}
+lasso_final_fit |> extract_fit_parsnip() |> tidy() |> knitr::kable()
+```
+
+# Regression Tree Plot
+```{r}
+extract_workflow(tree_final_fit) |>
+    extract_fit_engine() |>
+    rpart.plot::rpart.plot(roundint = FALSE)
+```
+
+# Bagged Tree Variable Importance Plot
+```{r}
+bag_final_model <- extract_fit_engine(bag_final_fit)
+bag_final_model$imp |>
+    mutate(term = factor(term, levels = term)) |>
+    ggplot(aes(x = term, y = value)) +
+    geom_bar(stat ="identity") +
+    coord_flip()
+```
+
+# Random Forest Variable Importance Plot
+```{r}
+#rf_importance <- vip::vi(ranger_fit)
+#rf_importance
+vip::vip(ranger_fit)
+```
 
 # Compare all final candidate models on test set
 ```{r}
@@ -315,10 +347,15 @@ rbind(
 ) |> group_by(Model, .metric) |>
     summarize(estimate = mean(.estimate, na.rm=TRUE), .groups = "drop") |>
     pivot_wider(names_from = .metric, values_from = estimate) |>
-    arrange(rmse)
+    arrange(rmse) |> knitr::kable()
 ```
 
+MLR Model 3 still performs the best, despite competition from the Bagged Tree and Random Forest models.
+
+# Fit Best Model (MLR 3) To Entire Data Set
 ```{r}
+final_model <- mlr_workflow3 |> fit(bikes) 
+tidy(final_model) |> knitr::kable()
+# Reset parallel processing to sequential
 plan(sequential)
 ```
-
